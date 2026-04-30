@@ -24,11 +24,18 @@ const app = express();
 
 app.use(helmet({
   contentSecurityPolicy: {
+    useDefaults: false,   // take full control — avoids Helmet's script-src-attr:'none'
     directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      connectSrc: ["'self'", 'ws:', 'wss:'],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+      defaultSrc:       ["'self'"],
+      scriptSrc:        ["'self'", "'unsafe-inline'"],
+      scriptSrcAttr:    ["'unsafe-inline'"], // allow onclick= handlers in HTML
+      connectSrc:       ["'self'", 'ws:', 'wss:'],
+      styleSrc:         ["'self'", "'unsafe-inline'"],
+      imgSrc:           ["'self'", 'data:'],
+      objectSrc:        ["'none'"],
+      baseUri:          ["'self'"],
+      formAction:       ["'self'"],
+      frameAncestors:   ["'self'"],
     },
   },
 }));

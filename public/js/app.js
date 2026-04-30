@@ -70,7 +70,7 @@ function _initChart() {
 // ─── Socket connection ────────────────────────────────────────────────────────
 
 function _connect() {
-  const socket = io({ auth: { token: state.token }, transports: ['websocket'] });
+  const socket = io({ auth: { token: state.token } }); // polling + websocket fallback
   state.socket = socket;
 
   socket.on('connect', () => {
