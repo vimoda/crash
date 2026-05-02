@@ -32,6 +32,8 @@ class CrashChart {
 
     this.rocketAngle = -Math.PI / 2; // rocket points upward
     this.rocketTrail = []; // trail particles for exhaust effect
+    this.explosionParticles = []; // explosion particles on crash
+    this.myBetAmount = 0; // user's current bet amount for profit display
     this._resize();
 
     window.addEventListener('resize', () => this._resize());
@@ -48,6 +50,7 @@ class CrashChart {
     this.lastTickElapsed = 0;
     this.lastTickTime = null;
     this.rocketTrail = [];
+    this.explosionParticles = [];
   }
 
   /** Called on gameRunning */
@@ -58,6 +61,7 @@ class CrashChart {
     this.lastTickTime = Date.now();
     this.lastTickElapsed = 0;
     this.rocketTrail = [];
+    this.explosionParticles = [];
   }
 
   /** Called on gameTick */
@@ -71,9 +75,9 @@ class CrashChart {
   setCrash(crashPoint) {
     this.state = 'crashed';
     this.crashedAt = crashPoint;
-    // Add the exact crash point as final data point
     const elapsedAtCrash = Math.log(crashPoint) / GROWTH_RATE;
     this.points.push({ elapsed: elapsedAtCrash, mult: crashPoint });
+    this._createExplosion();
   }
 
   setCashoutMarker(mult) {
@@ -87,6 +91,43 @@ class CrashChart {
 
   setAutoCashoutLine(mult) {
     this.autoCashoutLevel = mult;
+  }
+
+  setMyBetAmount(amount) {
+    this.myBetAmount = amount;
+  }
+
+  _createExplosion() {
+    const last = this.points[this.points.length - 1];
+    if (!last) return;
+    const elapsedAtCrash = last.elapsed;
+    const crashPoint = last.mult;
+    const crashed = this.state === 'crashed';
+    const left = 44, bottom = 24, pad = 30;
+    const W = this.canvas.width / (window.devicePixelRatio || 1);
+    const H = this.canvas.height / (window.devicePixelRatio || 1);
+    const plotW = W - left - pad;
+    const plotH = H - bottom - pad;
+    const maxMult = Math.max(crashPoint * 1.15, 2);
+    const maxElapsed = Math.max(elapsedAtCrash * 1.25, 12000);
+    const toX = ms => left + (ms / maxElapsed) * plotW;
+    const toY = mult => pad + plotH - ((mult - 1) / (maxMult - 1)) * plotH;
+    const ex = toX(elapsedAtCrash);
+    const ey = toY(crashPoint);
+    for (let i = 0; i < 40; i++) {
+      const angle = (Math.PI * 2 * i) / 40 + Math.random() * 0.3;
+      const speed = 2 + Math.random() * 4;
+      this.explosionParticles.push({
+        x: ex,
+        y: ey,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 1,
+        decay: 0.015 + Math.random() * 0.02,
+        r: 3 + Math.random() * 5,
+        hue: Math.random() < 0.5 ? 30 : 0,
+      });
+    }
   }
 
   /** If the page loaded mid-round, seed existing points */
@@ -115,32 +156,38 @@ class CrashChart {
 
     ctx.clearRect(0, 0, W, H);
 
-    if (state === 'waiting' || points.length < 2) {
-      this._drawGrid(W, H, 0, 1.2, 30);
-      return;
-    }
+    // Always draw grid
+    let maxMult = 1.2;
+    let maxElapsed = 12000;
+    let currentElapsed = 0;
+    let currentMult = 1.0;
 
-    // ── Extrapolate current position for smooth animation ──────────────────
-    let currentElapsed, currentMult;
+    // Always calculate current values
     if (state === 'running' && this.lastTickTime !== null) {
       const since = Date.now() - this.lastTickTime;
       currentElapsed = this.lastTickElapsed + since;
       currentMult = Math.exp(GROWTH_RATE * currentElapsed);
-    } else {
+      maxMult = Math.max(currentMult * 1.25, 2);
+      maxElapsed = Math.max(currentElapsed * 1.25, 12000);
+    } else if (state === 'crashed' && crashedAt) {
+      currentMult = crashedAt;
+      currentElapsed = Math.log(crashedAt) / GROWTH_RATE;
+      maxMult = Math.max(crashedAt * 1.15, 2);
+      maxElapsed = Math.max(currentElapsed * 1.25, 12000);
+    } else if (points.length > 0) {
       const last = points[points.length - 1];
       currentElapsed = last.elapsed;
       currentMult = last.mult;
+      maxMult = Math.max(currentMult * 1.25, 2);
+      maxElapsed = Math.max(currentElapsed * 1.25, 12000);
     }
 
-    // ── Determine visible ranges (auto-scale with head-room) ───────────────
-    const maxMult = state === 'crashed'
-      ? Math.max(crashedAt * 1.15, 2)
-      : Math.max(currentMult * 1.25, 2);
-
-    const maxElapsed = Math.max(currentElapsed * 1.25, 12000); // at least 12s visible
-
     this._drawGrid(W, H, maxElapsed, maxMult, 30);
-    this._drawCurve(W, H, maxElapsed, maxMult, currentElapsed, currentMult);
+
+    // Always draw curve if we have data
+    if (points.length >= 1) {
+      this._drawCurve(W, H, maxElapsed, maxMult, currentElapsed, currentMult);
+    }
   }
 
   // ─── Grid ──────────────────────────────────────────────────────────────────
@@ -237,8 +284,14 @@ class CrashChart {
     ctx.beginPath();
     ctx.moveTo(toX(drawPts[0].elapsed), toY(drawPts[0].mult));
     for (let i = 1; i < drawPts.length; i++) {
-      ctx.lineTo(toX(drawPts[i].elapsed), toY(drawPts[i].mult));
+      const prev = drawPts[i - 1];
+      const curr = drawPts[i];
+      const midX = (toX(prev.elapsed) + toX(curr.elapsed)) / 2;
+      const midY = (toY(prev.mult) + toY(curr.mult)) / 2;
+      ctx.quadraticCurveTo(toX(prev.elapsed), toY(prev.mult), midX, midY);
     }
+    const last = drawPts[drawPts.length - 1];
+    ctx.lineTo(toX(last.elapsed), toY(last.mult));
 
     ctx.strokeStyle = grad;
     ctx.lineWidth = 2.5;
@@ -248,6 +301,17 @@ class CrashChart {
 
     // ── Fill ───────────────────────────────────────────────────────────────
     const baseY = toY(1.0);
+    // Reconstruir la curva suave para el fill
+    ctx.beginPath();
+    ctx.moveTo(toX(drawPts[0].elapsed), toY(drawPts[0].mult));
+    for (let i = 1; i < drawPts.length; i++) {
+      const prev = drawPts[i - 1];
+      const curr = drawPts[i];
+      const midX = (toX(prev.elapsed) + toX(curr.elapsed)) / 2;
+      const midY = (toY(prev.mult) + toY(curr.mult)) / 2;
+      ctx.quadraticCurveTo(toX(prev.elapsed), toY(prev.mult), midX, midY);
+    }
+    ctx.lineTo(toX(drawPts[drawPts.length - 1].elapsed), toY(drawPts[drawPts.length - 1].mult));
     ctx.lineTo(toX(drawPts[drawPts.length - 1].elapsed), baseY);
     ctx.lineTo(toX(drawPts[0].elapsed), baseY);
     ctx.closePath();
@@ -263,11 +327,41 @@ class CrashChart {
     ctx.fillStyle = fillGrad;
     ctx.fill();
 
+    // ── Explosion particles ───────────────────────────────────────────
+    if (this.explosionParticles.length > 0) {
+      for (let i = this.explosionParticles.length - 1; i >= 0; i--) {
+        const p = this.explosionParticles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.15;
+        p.vx *= 0.98;
+        p.life -= p.decay;
+        if (p.life <= 0) {
+          this.explosionParticles.splice(i, 1);
+          continue;
+        }
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        const alpha = p.life * 0.9;
+        const hue = p.hue === 30 ? 30 : (p.hue === 0 ? 0 : 45);
+        ctx.fillStyle = `hsla(${hue}, 100%, 50%, ${alpha})`;
+        ctx.fill();
+      }
+    }
+
     // ── Rocket at tip ───────────────────────────────────────────────
-    if (!crashed) {
+    if (state === 'running') {
       const tx = toX(currentElapsed);
       const ty = toY(Math.min(currentMult, maxMult * 0.98));
-      this._drawRocket(ctx, tx, ty, currentMult, currentElapsed);
+      this._drawRocket(ctx, tx, ty, currentMult, currentElapsed, false);
+      if (this.myBetAmount > 0) {
+        this._drawProfitLabel(ctx, tx, ty + 25, this.myBetAmount, currentMult);
+      }
+    } else if (state === 'crashed' && this.points.length > 0) {
+      const lastCrash = this.points[this.points.length - 1];
+      const cx = toX(lastCrash.elapsed);
+      const cy = toY(lastCrash.mult);
+      this._drawRocket(ctx, cx, cy, lastCrash.mult, lastCrash.elapsed, true);
     }
 
     // ── Cashout marker (player's cashout point) ────────────────────────────
@@ -309,7 +403,7 @@ class CrashChart {
 
   // ─── Rocket drawing ─────────────────────────────────────────────────────────
 
-  _drawRocket(ctx, x, y, mult, elapsed) {
+  _drawRocket(ctx, x, y, mult, elapsed, isCrashed = false) {
     const speed = Math.min(1.5, 0.3 + mult * 0.08);
 
     // Exhaust trail particles
@@ -368,21 +462,28 @@ class CrashChart {
     ctx.lineTo(7, 8);
     ctx.closePath();
     const bodyGrad = ctx.createLinearGradient(0, -14, 0, 8);
-    bodyGrad.addColorStop(0, '#e8e8e8');
-    bodyGrad.addColorStop(0.5, '#b0b0b0');
-    bodyGrad.addColorStop(1, '#888');
+    if (isCrashed) {
+      bodyGrad.addColorStop(0, '#4a4a4a');
+      bodyGrad.addColorStop(0.5, '#2a2a2a');
+      bodyGrad.addColorStop(1, '#1a1a1a');
+    } else {
+      bodyGrad.addColorStop(0, '#e8e8e8');
+      bodyGrad.addColorStop(0.5, '#b0b0b0');
+      bodyGrad.addColorStop(1, '#888');
+    }
     ctx.fillStyle = bodyGrad;
     ctx.fill();
-    ctx.strokeStyle = '#555';
+    ctx.strokeStyle = isCrashed ? '#333' : '#555';
     ctx.lineWidth = 1;
     ctx.stroke();
 
     // Rocket fins
+    const finColor = isCrashed ? '#4a2020' : '#c0392b';
     ctx.beginPath();
     ctx.moveTo(-7, 6);
     ctx.lineTo(-12, 12);
     ctx.lineTo(-7, 8);
-    ctx.fillStyle = '#c0392b';
+    ctx.fillStyle = finColor;
     ctx.fill();
     ctx.stroke();
 
@@ -390,40 +491,56 @@ class CrashChart {
     ctx.moveTo(7, 6);
     ctx.lineTo(12, 12);
     ctx.lineTo(7, 8);
-    ctx.fillStyle = '#c0392b';
+    ctx.fillStyle = finColor;
     ctx.fill();
     ctx.stroke();
 
     // Window
     ctx.beginPath();
     ctx.arc(0, -2, 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#3498db';
+    ctx.fillStyle = isCrashed ? '#2a3a4a' : '#3498db';
     ctx.fill();
-    ctx.strokeStyle = '#2980b9';
+    ctx.strokeStyle = isCrashed ? '#1a2a3a' : '#2980b9';
     ctx.lineWidth = 0.8;
     ctx.stroke();
 
-    // Flame at bottom (size scales with multiplier)
-    const flameIntensity = Math.min(mult * 0.15, 1.2);
-    const flameH = 8 + flameIntensity * 6 + Math.random() * 4;
+    // Flame at bottom (only when not crashed)
+    if (!isCrashed) {
+      const flameIntensity = Math.min(mult * 0.15, 1.2);
+      const flameH = 8 + flameIntensity * 6 + Math.random() * 4;
 
-    ctx.beginPath();
-    ctx.moveTo(-5, 8);
-    ctx.quadraticCurveTo(0, 8 + flameH, 5, 8);
-    ctx.fillStyle = '#f39c12';
-    ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-5, 8);
+      ctx.quadraticCurveTo(0, 8 + flameH, 5, 8);
+      ctx.fillStyle = '#f39c12';
+      ctx.fill();
 
-    ctx.beginPath();
-    ctx.moveTo(-3, 8);
-    ctx.quadraticCurveTo(0, 8 + flameH * 0.7, 3, 8);
-    ctx.fillStyle = '#e74c3c';
-    ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-3, 8);
+      ctx.quadraticCurveTo(0, 8 + flameH * 0.7, 3, 8);
+      ctx.fillStyle = '#e74c3c';
+      ctx.fill();
 
-    ctx.beginPath();
-    ctx.moveTo(-1.5, 8);
-    ctx.quadraticCurveTo(0, 8 + flameH * 0.4, 1.5, 8);
-    ctx.fillStyle = '#f1c40f';
-    ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-1.5, 8);
+      ctx.quadraticCurveTo(0, 8 + flameH * 0.4, 1.5, 8);
+      ctx.fillStyle = '#f1c40f';
+      ctx.fill();
+    } else {
+      // Draw smoke/charcoal effect when crashed
+      ctx.beginPath();
+      ctx.arc(0, 10, 6, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(30, 30, 30, 0.7)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(-3, 12, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(40, 40, 40, 0.5)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(3, 12, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(40, 40, 40, 0.5)';
+      ctx.fill();
+    }
 
     // Speed lines (when multiplier is high)
     if (mult > 2) {
@@ -443,13 +560,50 @@ class CrashChart {
     ctx.restore();
   }
 
+  _drawProfitLabel(ctx, x, y, betAmount, currentMult) {
+    const profit = betAmount * currentMult - betAmount;
+    const isProfit = profit >= 0;
+    const text = (isProfit ? '+' : '') + profit.toFixed(2) + ' COINS';
+    const textColor = isProfit ? '#00ff88' : '#ff4444';
+    const bgColor = isProfit ? 'rgba(0, 40, 30, 0.85)' : 'rgba(40, 10, 10, 0.85)';
+
+    ctx.save();
+    ctx.font = 'bold 12px "Courier New", monospace';
+    const textWidth = ctx.measureText(text).width;
+    const padding = 6;
+    const boxWidth = textWidth + padding * 2;
+    const boxHeight = 20;
+    const boxX = x - boxWidth / 2;
+    const boxY = y;
+
+    ctx.fillStyle = bgColor;
+    ctx.beginPath();
+    ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 4);
+    ctx.fill();
+    ctx.strokeStyle = isProfit ? 'rgba(0, 255, 136, 0.4)' : 'rgba(255, 68, 68, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = textColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, y + boxHeight / 2);
+
+    ctx.restore();
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   _resize() {
     const parent = this.canvas.parentElement;
     const dpr = window.devicePixelRatio || 1;
-    const w = parent.clientWidth;
-    const h = parent.clientHeight;
+    let w = parent.clientWidth;
+    let h = parent.clientHeight;
+    // If dimensions are 0, wait and retry
+    if (w === 0 || h === 0) {
+      setTimeout(() => this._resize(), 50);
+      return;
+    }
     this.canvas.width  = w * dpr;
     this.canvas.height = h * dpr;
     this.canvas.style.width  = w + 'px';

@@ -77,6 +77,10 @@ let chart;
 
 function _initChart() {
   const canvas = document.getElementById('chartCanvas');
+  if (!canvas) {
+    setTimeout(_initChart, 50);
+    return;
+  }
   chart = new CrashChart(canvas);
 }
 
@@ -119,8 +123,11 @@ function _connect() {
     state.myCashoutMult = null;
     state.bets.clear();
 
-    chart.reset();
-    chart.clearCashoutMarker();
+    if (chart) {
+      chart.reset();
+      chart.clearCashoutMarker();
+      chart.setMyBetAmount(0);
+    }
     if (data.houseBalance !== undefined) {
       state.houseBalance = data.houseBalance;
       _updateBankrollUI();
@@ -136,14 +143,17 @@ function _connect() {
     state.phase     = 'running';
     state.startTime = data.startTime;
 
-    chart.startRunning(data.startTime);
+    if (chart) {
+      chart._resize();
+      chart.startRunning(data.startTime);
+    }
     _renderPhase();
     _stopCountdown();
   });
 
   socket.on('gameTick', ({ multiplier, elapsed }) => {
     state.currentMult = multiplier;
-    chart.addPoint(elapsed, multiplier);
+    if (chart) chart.addPoint(elapsed, multiplier);
     _updateMultiplierDisplay(multiplier);
     _updateLiveProfits(multiplier);
   });
@@ -154,7 +164,7 @@ function _connect() {
     state.crashPoint = data.crashPoint;
     state.serverSeed = data.serverSeed;
 
-    chart.setCrash(data.crashPoint);
+    if (chart) chart.setCrash(data.crashPoint);
     _renderPhase();
     _updateFairSection();
     _updateBetsAfterCrash(data.bets);
@@ -229,7 +239,7 @@ function _connect() {
         won: true,
       });
       if (state.myHistory.length > 10) state.myHistory.pop();
-      chart.setCashoutMarker(multiplier);
+      if (chart) chart.setCashoutMarker(multiplier);
       _renderMyHistory();
     }
   });
@@ -255,18 +265,22 @@ function _applyGameState(data) {
 
   if (data.state === 'waiting') {
     state.endsAt = data.endsAt;
-    chart.reset();
+    if (chart) chart.reset();
     _startCountdown();
   } else if (data.state === 'running') {
     state.startTime    = data.startTime;
     state.currentMult  = data.currentMultiplier;
-    chart.startRunning(data.startTime);
-    chart.seedPoints(data.elapsed);
+    if (chart) {
+      chart.startRunning(data.startTime);
+      chart.seedPoints(data.elapsed);
+    }
   } else if (data.state === 'crashed') {
     state.crashPoint = data.crashPoint;
     state.serverSeed = data.serverSeed;
-    chart.seedPoints(Math.log(data.crashPoint) / GROWTH_RATE);
-    chart.setCrash(data.crashPoint);
+    if (chart) {
+      chart.seedPoints(Math.log(data.crashPoint) / GROWTH_RATE);
+      chart.setCrash(data.crashPoint);
+    }
   }
 
   if (data.houseBalance !== undefined) {
@@ -419,12 +433,13 @@ function _placeBet() {
   }
 
   log('ACTION', `placeBet amount=${amount} autoCashout=${autoCashout}`);
-  if (autoCashout) chart.setAutoCashoutLine(autoCashout);
+  if (chart && autoCashout) chart.setAutoCashoutLine(autoCashout);
   state.socket.emit('placeBet', { amount, autoCashout }, (res) => {
     if (res.error) { err('ACTION', `placeBet failed: ${res.error}`); showToast(res.error, 'error'); return; }
     log('ACTION', `placeBet OK balance=${res.balance}`);
     state.myBet = { amount, autoCashout };
     state.balance = res.balance;
+    if (chart) chart.setMyBetAmount(amount);
     _updateBalanceUI();
     _renderPhase();
     showToast(`Bet placed: ${amount.toFixed(2)} COINS`, 'ok');
@@ -442,7 +457,7 @@ function _cashOut() {
     state.balance       = res.balance;
     _updateBalanceUI();
     _renderPhase();
-    chart.setCashoutMarker(res.multiplier);
+    if (chart) chart.setCashoutMarker(res.multiplier);
     // Add to personal history
     state.myHistory.unshift({
       roundId: state.roundId,
@@ -559,7 +574,7 @@ function _renderHistory() {
   bar.innerHTML = recent.map(r => {
     const cls   = crashClass(r.crashPoint);
     const label = r.crashPoint.toFixed(2) + '×';
-    return `<span class="hist-pill ${cls}" title="Round #${r.id}">
+    return `<span class="hist-pill ${cls}" onclick="showRoundDetail(${r.id})" title="Click para ver detalles - Round #${r.id}">
       <span class="hist-dot"></span>${label}
     </span>`;
   }).join('');
@@ -568,7 +583,7 @@ function _renderHistory() {
   const pills = document.getElementById('recentPills');
   pills.innerHTML = recent.slice(0, 5).map(r => {
     const cls = crashClass(r.crashPoint);
-    return `<span class="hist-pill ${cls}" style="font-size:11px">
+    return `<span class="hist-pill ${cls}" onclick="showRoundDetail(${r.id})" style="font-size:11px;cursor:pointer" title="Click para ver detalles">
       <span class="hist-dot"></span>#${r.id} ${r.crashPoint.toFixed(2)}×
     </span>`;
   }).join('');
@@ -824,7 +839,7 @@ function _renderGameHistory() {
       tbody.innerHTML = rounds.slice(0, 20).map(r => {
         const hashShort = r.serverSeedHash ? r.serverSeedHash.slice(0, 16) + '…' : '—';
         const hasData = r.serverSeed && r.serverSeedHash;
-        return `<tr>
+        return `<tr onclick="showRoundDetail(${r.id})" style="cursor:pointer">
           <td>#${r.id}</td>
           <td class="${r.crashPoint < 2 ? 'loss' : r.crashPoint < 5 ? 'live' : 'win'}">${r.crashPoint.toFixed(2)}×</td>
           <td style="font-size:10px;font-family:monospace">${hashShort}</td>
@@ -848,6 +863,102 @@ function verifyRound(roundId, serverSeed, serverSeedHash, crashPoint, btn) {
       btn.className = 'btn-verify ' + (valid ? 'valid' : 'invalid');
     })
     .catch(() => { btn.textContent = 'ERROR'; });
+}
+
+function showRoundDetail(roundId) {
+  fetch('/api/game/history')
+    .then(r => r.json())
+    .then(data => {
+      const round = data.rounds.find(r => r.id === roundId);
+      if (!round) {
+        showToast('Ronda no encontrada', 'error');
+        return;
+      }
+      document.getElementById('resultRoundId').textContent = round.id;
+      document.getElementById('resultCrashPoint').textContent = round.crashPoint ? round.crashPoint.toFixed(2) : '0.00';
+      document.getElementById('resultServerHash').textContent = round.serverSeedHash || '—';
+      document.getElementById('resultServerSeed').textContent = round.serverSeed || '—';
+
+      const betsSection = document.getElementById('resultBetsSection');
+      if (round.bets && round.bets.length > 0) {
+        betsSection.style.display = 'block';
+        const betsTbody = document.getElementById('resultBetsTbody');
+        betsTbody.innerHTML = round.bets.map(b => {
+          const profit = b.cashedOut ? (b.profit - b.amount) : -b.amount;
+          const resultText = b.cashedOut ? b.cashedOutAt.toFixed(2) + '×' : 'LOST';
+          const resultClass = b.cashedOut ? 'win' : 'loss';
+          return `<tr>
+            <td>${esc(b.username || 'Unknown')}</td>
+            <td>${b.amount.toFixed(2)}</td>
+            <td>${resultText}</td>
+            <td class="${resultClass}">${profit >= 0 ? '+' : ''}${profit.toFixed(2)}</td>
+          </tr>`;
+        }).join('');
+      } else {
+        betsSection.style.display = 'none';
+      }
+
+      document.getElementById('resultModal').style.display = 'flex';
+    })
+    .catch(err => {
+      showToast('Error al cargar detalles de ronda', 'error');
+    });
+}
+
+function closeResultModal() {
+  document.getElementById('resultModal').style.display = 'none';
+}
+
+function verifyResultManually() {
+  const input = document.getElementById('resultVerifyManualInput').value.trim();
+  const serverHash = document.getElementById('resultServerHash').textContent;
+  const statusEl = document.getElementById('resultVerifyStatus');
+
+  if (!input) {
+    statusEl.textContent = 'Please enter the computed hash';
+    statusEl.style.color = '#ff4444';
+    return;
+  }
+
+  if (input.toLowerCase() === serverHash.toLowerCase()) {
+    statusEl.textContent = '✓ Hash matches! Server seed is valid.';
+    statusEl.style.color = '#00ff88';
+  } else {
+    statusEl.textContent = '✗ Hash does not match. Invalid.';
+    statusEl.style.color = '#ff4444';
+  }
+}
+
+function verifyCurrentResult() {
+  const roundId = document.getElementById('resultRoundId').textContent;
+  const serverSeed = document.getElementById('resultServerSeed').textContent;
+  const serverHash = document.getElementById('resultServerHash').textContent;
+  const crashPoint = parseFloat(document.getElementById('resultCrashPoint').textContent);
+
+  if (!serverSeed || serverSeed === '—') {
+    showToast('Server seed not revealed yet', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btnVerifyResult');
+  btn.textContent = '...';
+
+  const params = new URLSearchParams({ serverSeed, serverSeedHash: serverHash, crashPoint });
+  fetch(`/api/game/verify/${roundId}?${params}`)
+    .then(r => r.json())
+    .then(({ valid }) => {
+      btn.textContent = valid ? '✓ VALID' : '✗ INVALID';
+      btn.className = 'btn-verify-modal ' + (valid ? 'valid' : 'invalid');
+      const statusEl = document.getElementById('resultVerifyStatus');
+      statusEl.textContent = valid
+        ? '✓ Verified! Crash point matches the server seed.'
+        : '✗ Verification failed!';
+      statusEl.style.color = valid ? '#00ff88' : '#ff4444';
+    })
+    .catch(() => {
+      btn.textContent = 'ERROR';
+      showToast('Verification error', 'error');
+    });
 }
 
 // ─── Win Animation ────────────────────────────────────────────────────────────
