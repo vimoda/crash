@@ -98,8 +98,9 @@ io.use((socket, next) => {
       const payload = jwt.verify(token, JWT_SECRET);
       socket.userId = payload.userId;
       socket.username = payload.username;
-    } catch {
-      // Invalid token — treat as guest
+      console.log(`[socket] auth OK  id=${socket.id} user=${payload.username}`);
+    } catch (err) {
+      console.warn(`[socket] auth FAIL id=${socket.id} err="${err.message}" — treating as guest`);
     }
   }
   next();
@@ -130,15 +131,31 @@ function socketRateLimit(socket, action, minIntervalMs) {
 }
 
 io.on('connection', socket => {
+  const ip = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+  console.log(`[socket] CONNECT  id=${socket.id} ip=${ip} user=${socket.username || 'guest'}`);
+
   // Send current game state so the client can sync immediately
-  socket.emit('gameState', game.getState());
+  const state = game.getState();
+  console.log(`[socket] SYNC     id=${socket.id} gameState=${state.state} round=${state.roundId}`);
+  socket.emit('gameState', state);
+
+  socket.on('disconnect', reason => {
+    console.log(`[socket] DISCONN  id=${socket.id} user=${socket.username || 'guest'} reason=${reason}`);
+  });
+
+  socket.on('error', err => {
+    console.error(`[socket] ERROR    id=${socket.id} err="${err.message}"`);
+  });
 
   // ── Place bet ────────────────────────────────────────────────────────────
   socket.on('placeBet', ({ amount, autoCashout } = {}, cb) => {
     if (typeof cb !== 'function') return;
 
     if (!socket.userId) return cb({ error: 'You must be logged in to bet' });
-    if (!socketRateLimit(socket, 'placeBet', 500)) return cb({ error: 'Too fast' });
+    if (!socketRateLimit(socket, 'placeBet', 500)) {
+      console.warn(`[socket] RATELIMIT placeBet id=${socket.id}`);
+      return cb({ error: 'Too fast' });
+    }
 
     try {
       const result = game.placeBet(socket.userId, socket.username, amount, autoCashout);
@@ -153,22 +170,7 @@ io.on('connection', socket => {
 
       cb({ ok: true, balance: user.balance });
     } catch (err) {
-      cb({ error: err.message });
-    }
-  });
-
-  // ── Cancel bet ───────────────────────────────────────────────────────────
-  socket.on('cancelBet', (_, cb) => {
-    if (typeof cb !== 'function') return;
-    if (!socket.userId) return cb({ error: 'Not authenticated' });
-
-    try {
-      game.cancelBet(socket.userId);
-      const user = db.findUserById(socket.userId);
-
-      io.emit('betCanceled', { userId: socket.userId, username: socket.username });
-      cb({ ok: true, balance: user.balance });
-    } catch (err) {
+      console.warn(`[socket] placeBet ERR id=${socket.id} err="${err.message}"`);
       cb({ error: err.message });
     }
   });
@@ -177,13 +179,17 @@ io.on('connection', socket => {
   socket.on('cashOut', (_, cb) => {
     if (typeof cb !== 'function') return;
     if (!socket.userId) return cb({ error: 'Not authenticated' });
-    if (!socketRateLimit(socket, 'cashOut', 200)) return cb({ error: 'Too fast' });
+    if (!socketRateLimit(socket, 'cashOut', 200)) {
+      console.warn(`[socket] RATELIMIT cashOut id=${socket.id}`);
+      return cb({ error: 'Too fast' });
+    }
 
     try {
       const result = game.cashOut(socket.userId);
       const user = db.findUserById(socket.userId);
       cb({ ok: true, multiplier: result.cashedOutAt, profit: result.profit, balance: user.balance });
     } catch (err) {
+      console.warn(`[socket] cashOut ERR id=${socket.id} err="${err.message}"`);
       cb({ error: err.message });
     }
   });
@@ -195,6 +201,13 @@ io.on('connection', socket => {
     const user = db.findUserById(socket.userId);
     if (!user) return cb({ error: 'User not found' });
     cb({ balance: user.balance });
+  });
+
+  // ── Get player history ───────────────────────────────────────────────────
+  socket.on('getPlayerHistory', (_, cb) => {
+    if (typeof cb !== 'function') return;
+    if (!socket.userId) return cb({ error: 'Not authenticated' });
+    cb({ rounds: db.getPlayerRounds(socket.userId, 10) });
   });
 });
 

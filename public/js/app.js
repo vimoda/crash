@@ -9,6 +9,13 @@
  *  • Provably-fair section updates
  */
 
+// ─── Logger ───────────────────────────────────────────────────────────────────
+
+const LOG_PREFIX = '[crash]';
+function log(tag, msg, data)  { console.log(`${LOG_PREFIX} ${tag.padEnd(10)} ${msg}`, data !== undefined ? data : ''); }
+function warn(tag, msg, data) { console.warn(`${LOG_PREFIX} ${tag.padEnd(10)} ${msg}`, data !== undefined ? data : ''); }
+function err(tag, msg, data)  { console.error(`${LOG_PREFIX} ${tag.padEnd(10)} ${msg}`, data !== undefined ? data : ''); }
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 const state = {
@@ -34,6 +41,9 @@ const state = {
   history: [],         // recent rounds [{id, crashPoint}]
 
   countdownTimer: null,
+
+  houseBalance: 0,
+  myHistory: [],    // { roundId, amount, cashedOutAt, profit, won }
 };
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -48,7 +58,10 @@ document.addEventListener('DOMContentLoaded', () => {
     state.token    = savedToken;
     state.username = savedUsername;
     state.balance  = parseFloat(savedBalance) || 0;
+    log('INIT', `session restored user=${savedUsername}`);
     _updateUserUI();
+  } else {
+    log('INIT', 'no saved session — connecting as guest');
   }
 
   _connect();
@@ -74,19 +87,27 @@ function _connect() {
   state.socket = socket;
 
   socket.on('connect', () => {
-    console.log('[socket] connected', socket.id);
+    log('SOCKET', `connected id=${socket.id} transport=${socket.io.engine.transport.name}`);
+  });
+
+  socket.on('connect_error', (e) => {
+    err('SOCKET', `connect_error: ${e.message}`);
   });
 
   socket.on('disconnect', reason => {
-    console.warn('[socket] disconnected:', reason);
+    warn('SOCKET', `disconnected reason=${reason}`);
     showToast('Connection lost — reconnecting…', 'warn');
   });
 
   // ── Game events ────────────────────────────────────────────────────────────
 
-  socket.on('gameState', data => _applyGameState(data));
+  socket.on('gameState', data => {
+    log('EVENT', `gameState state=${data.state} round=${data.roundId} bets=${(data.bets||[]).length}`);
+    _applyGameState(data);
+  });
 
   socket.on('gameWaiting', data => {
+    log('EVENT', `gameWaiting round=${data.roundId}`);
     state.phase         = 'waiting';
     state.roundId       = data.roundId;
     state.serverSeedHash = data.serverSeedHash;
@@ -99,6 +120,11 @@ function _connect() {
     state.bets.clear();
 
     chart.reset();
+    chart.clearCashoutMarker();
+    if (data.houseBalance !== undefined) {
+      state.houseBalance = data.houseBalance;
+      _updateBankrollUI();
+    }
     _renderPhase();
     _startCountdown();
     _updateFairSection();
@@ -106,6 +132,7 @@ function _connect() {
   });
 
   socket.on('gameRunning', data => {
+    log('EVENT', `gameRunning round=${data.roundId}`);
     state.phase     = 'running';
     state.startTime = data.startTime;
 
@@ -118,9 +145,11 @@ function _connect() {
     state.currentMult = multiplier;
     chart.addPoint(elapsed, multiplier);
     _updateMultiplierDisplay(multiplier);
+    _updateLiveProfits(multiplier);
   });
 
   socket.on('gameCrash', data => {
+    log('EVENT', `gameCrash round=${data.roundId} crashPoint=${data.crashPoint}x bets=${(data.bets||[]).length}`);
     state.phase      = 'crashed';
     state.crashPoint = data.crashPoint;
     state.serverSeed = data.serverSeed;
@@ -129,15 +158,33 @@ function _connect() {
     _renderPhase();
     _updateFairSection();
     _updateBetsAfterCrash(data.bets);
+    const card = document.querySelector('.game-card');
+    if (card) { card.classList.add('crash-flash'); setTimeout(() => card.classList.remove('crash-flash'), 500); }
 
     // History pill
     state.history.unshift({ id: data.roundId, crashPoint: data.crashPoint });
     if (state.history.length > 30) state.history.pop();
     _renderHistory();
+    _renderGameHistory();
+
+    if (data.houseBalance !== undefined) {
+      state.houseBalance = data.houseBalance;
+      _updateBankrollUI();
+    }
 
     // Was our bet still active?
     if (state.myBet && !state.myCashedOut) {
       showToast(`Crashed at ${data.crashPoint.toFixed(2)}× — lost ${state.myBet.amount.toFixed(2)}`, 'error');
+      // Track loss in personal history
+      state.myHistory.unshift({
+        roundId: data.roundId,
+        amount: state.myBet.amount,
+        cashedOutAt: null,
+        profit: -state.myBet.amount,
+        won: false,
+      });
+      if (state.myHistory.length > 10) state.myHistory.pop();
+      _renderMyHistory();
     }
   });
 
@@ -165,12 +212,33 @@ function _connect() {
       bet.profit      = profit;
     }
     _renderBetsTable();
+    if (username === state.username && state.myBet && !state.myCashedOut) {
+      state.myCashedOut = true;
+      state.myCashoutMult = multiplier;
+      state.socket.emit('getBalance', {}, (r) => { if (!r.error) { state.balance = r.balance; _updateBalanceUI(); } });
+      _renderPhase();
+      const netProfit = profit - amount;
+      showToast(`Auto cash-out at ${multiplier.toFixed(2)}× → +${netProfit.toFixed(2)} profit`, 'ok');
+      showWinAnimation(multiplier, netProfit);
+      // Track auto-cashout in personal history
+      state.myHistory.unshift({
+        roundId: state.roundId,
+        amount: state.myBet.amount,
+        cashedOutAt: multiplier,
+        profit: profit - amount,
+        won: true,
+      });
+      if (state.myHistory.length > 10) state.myHistory.pop();
+      chart.setCashoutMarker(multiplier);
+      _renderMyHistory();
+    }
   });
 }
 
 // ─── Sync to existing game state (on (re)connect) ─────────────────────────────
 
 function _applyGameState(data) {
+  log('SYNC', `state=${data.state} round=${data.roundId} bets=${(data.bets||[]).length}`);
   state.phase          = data.state;
   state.roundId        = data.roundId;
   state.serverSeedHash = data.serverSeedHash;
@@ -201,6 +269,11 @@ function _applyGameState(data) {
     chart.setCrash(data.crashPoint);
   }
 
+  if (data.houseBalance !== undefined) {
+    state.houseBalance = data.houseBalance;
+    _updateBankrollUI();
+  }
+
   _renderPhase();
   _renderBetsTable();
   _updateFairSection();
@@ -211,8 +284,12 @@ function _applyGameState(data) {
     .then(({ rounds }) => {
       state.history = rounds.map(r => ({ id: r.id, crashPoint: r.crashPoint }));
       _renderHistory();
+      _renderGameHistory();
     })
     .catch(() => {});
+
+  _renderMyHistory();
+  _fetchPlayerHistory();
 }
 
 // ─── Phase rendering ──────────────────────────────────────────────────────────
@@ -236,34 +313,56 @@ function _renderPhase() {
 
   if (phase === 'waiting') {
     countdown.style.display = 'block';
-    actionBtn.disabled = !state.token;
-    actionBtn.className = 'btn btn-green btn-action';
-    actionBtn.textContent = myBet ? 'Cancel Bet' : 'Place Bet';
-    if (myBet) actionBtn.className = 'btn btn-cancel btn-action';
-    betInputs.style.opacity  = myBet ? '0.4' : '1';
-    betInputs.style.pointerEvents = myBet ? 'none' : 'auto';
     _stopCountdown();
     _startCountdown();
+
+    if (!state.token) {
+      actionBtn.disabled = true;
+      actionBtn.className = 'btn btn-action';
+      actionBtn.textContent = 'Login to Bet';
+      betInputs.style.opacity = '1';
+      betInputs.style.pointerEvents = 'auto';
+    } else if (myBet) {
+      // Bet placed — cannot cancel
+      actionBtn.disabled = true;
+      actionBtn.className = 'btn btn-green btn-action';
+      actionBtn.textContent = '✓ Bet Placed';
+      betInputs.style.opacity = '0.4';
+      betInputs.style.pointerEvents = 'none';
+    } else {
+      actionBtn.disabled = false;
+      actionBtn.className = 'btn btn-green btn-action';
+      actionBtn.textContent = 'Place Bet';
+      betInputs.style.opacity = '1';
+      betInputs.style.pointerEvents = 'auto';
+    }
 
   } else if (phase === 'running') {
     multBig.style.display = 'block';
     _updateMultiplierDisplay(state.currentMult);
 
     if (myBet && !myCashedOut) {
+      // User is actively playing — block inputs, show cashout
       actionBtn.disabled    = false;
       actionBtn.className   = 'btn btn-cashout btn-action';
       actionBtn.textContent = 'Cash Out';
+      betInputs.style.opacity = '0.4';
+      betInputs.style.pointerEvents = 'none';
     } else if (myBet && myCashedOut) {
+      // Already cashed out — inputs free to prepare next bet
       actionBtn.disabled    = true;
       actionBtn.className   = 'btn btn-action';
-      actionBtn.textContent = `✓ Cashed ${state.myCashoutMult ? state.myCashoutMult.toFixed(2) + '×' : 'out'}`;
+      actionBtn.textContent = `✓ ${state.myCashoutMult ? state.myCashoutMult.toFixed(2) + '×' : 'Cashed Out'}`;
+      betInputs.style.opacity = '1';
+      betInputs.style.pointerEvents = 'auto';
     } else {
+      // No active bet — allow editing inputs for next round
       actionBtn.disabled    = true;
       actionBtn.className   = 'btn btn-action';
-      actionBtn.textContent = 'In Progress';
+      actionBtn.textContent = 'Next Round...';
+      betInputs.style.opacity = '1';
+      betInputs.style.pointerEvents = 'auto';
     }
-    betInputs.style.opacity  = '0.4';
-    betInputs.style.pointerEvents = 'none';
 
   } else if (phase === 'crashed') {
     multBig.style.display = 'none';
@@ -273,13 +372,8 @@ function _renderPhase() {
     actionBtn.disabled    = true;
     actionBtn.className   = 'btn btn-action';
     actionBtn.textContent = 'Place Bet';
-    betInputs.style.opacity  = '0.4';
-    betInputs.style.pointerEvents = 'none';
-  }
-
-  if (!state.token) {
-    actionBtn.disabled = true;
-    actionBtn.textContent = phase === 'waiting' ? 'Login to Bet' : actionBtn.textContent;
+    betInputs.style.opacity = '1';
+    betInputs.style.pointerEvents = 'auto';
   }
 }
 
@@ -308,11 +402,8 @@ function _stopCountdown() {
 
 function handleAction() {
   const { phase, myBet } = state;
-  if (phase === 'waiting') {
-    if (myBet) _cancelBet(); else _placeBet();
-  } else if (phase === 'running') {
-    _cashOut();
-  }
+  if (phase === 'waiting' && !myBet) _placeBet();
+  else if (phase === 'running' && myBet && !state.myCashedOut) _cashOut();
 }
 
 function _placeBet() {
@@ -327,8 +418,11 @@ function _placeBet() {
     showToast('Auto cash-out must be ≥ 1.01', 'error'); return;
   }
 
+  log('ACTION', `placeBet amount=${amount} autoCashout=${autoCashout}`);
+  if (autoCashout) chart.setAutoCashoutLine(autoCashout);
   state.socket.emit('placeBet', { amount, autoCashout }, (res) => {
-    if (res.error) { showToast(res.error, 'error'); return; }
+    if (res.error) { err('ACTION', `placeBet failed: ${res.error}`); showToast(res.error, 'error'); return; }
+    log('ACTION', `placeBet OK balance=${res.balance}`);
     state.myBet = { amount, autoCashout };
     state.balance = res.balance;
     _updateBalanceUI();
@@ -337,28 +431,32 @@ function _placeBet() {
   });
 }
 
-function _cancelBet() {
-  state.socket.emit('cancelBet', {}, (res) => {
-    if (res.error) { showToast(res.error, 'error'); return; }
-    state.myBet   = null;
-    state.balance = res.balance;
-    _updateBalanceUI();
-    _renderPhase();
-    showToast('Bet cancelled', 'warn');
-  });
-}
 
 function _cashOut() {
+  log('ACTION', `cashOut at mult=${state.currentMult}`);
   state.socket.emit('cashOut', {}, (res) => {
-    if (res.error) { showToast(res.error, 'error'); return; }
+    if (res.error) { err('ACTION', `cashOut failed: ${res.error}`); showToast(res.error, 'error'); return; }
+    log('ACTION', `cashOut OK at=${res.multiplier}x profit=${res.profit} balance=${res.balance}`);
     state.myCashedOut   = true;
     state.myCashoutMult = res.multiplier;
     state.balance       = res.balance;
     _updateBalanceUI();
     _renderPhase();
-    const profit = res.profit - state.myBet.amount;
+    chart.setCashoutMarker(res.multiplier);
+    // Add to personal history
+    state.myHistory.unshift({
+      roundId: state.roundId,
+      amount: state.myBet.amount,
+      cashedOutAt: res.multiplier,
+      profit: res.profit - state.myBet.amount,
+      won: true,
+    });
+    if (state.myHistory.length > 10) state.myHistory.pop();
+    _renderMyHistory();
+    const netProfit = res.profit - state.myBet.amount;
+    showWinAnimation(res.multiplier, netProfit);
     showToast(
-      `Cashed out at ${res.multiplier.toFixed(2)}× → +${profit.toFixed(2)} profit`,
+      `Cashed out at ${res.multiplier.toFixed(2)}× → +${netProfit.toFixed(2)} profit`,
       'ok'
     );
   });
@@ -387,7 +485,7 @@ function doubleAmount() {
 function _renderBetsTable() {
   const tbody  = document.getElementById('betsTbody');
   const count  = document.getElementById('betCount');
-  const bets   = Array.from(state.bets.values());
+  const bets   = Array.from(state.bets.entries());
 
   count.textContent = bets.length + ' bet' + (bets.length !== 1 ? 's' : '');
 
@@ -397,22 +495,46 @@ function _renderBetsTable() {
   }
 
   // Sort: cashed-out first (they won), then active
-  bets.sort((a, b) => (b.cashedOut ? 1 : 0) - (a.cashedOut ? 1 : 0));
+  bets.sort(([, a], [, b]) => (b.cashedOut ? 1 : 0) - (a.cashedOut ? 1 : 0));
 
-  tbody.innerHTML = bets.map(b => {
+  tbody.innerHTML = bets.map(([userId, b]) => {
     const atText  = b.cashedOut ? b.cashedOutAt.toFixed(2) + '×' : '—';
-    const profitText = b.cashedOut
-      ? '+' + (b.profit - b.amount).toFixed(2)
-      : (state.phase === 'crashed' ? '-' + b.amount.toFixed(2) : '…');
-    const cls = b.cashedOut ? 'win' : (state.phase === 'crashed' ? 'loss' : 'live');
+    let profitText, cls;
+    if (b.cashedOut) {
+      profitText = '+' + (b.profit - b.amount).toFixed(2);
+      cls = 'win';
+    } else if (state.phase === 'crashed') {
+      profitText = '-' + b.amount.toFixed(2);
+      cls = 'loss';
+    } else if (state.phase === 'running') {
+      const live = b.amount * state.currentMult - b.amount;
+      profitText = '+' + live.toFixed(2);
+      cls = 'live';
+    } else {
+      profitText = '—';
+      cls = 'live';
+    }
 
-    return `<tr>
+    return `<tr data-userid="${esc(String(userId))}">
       <td class="player-name">${esc(b.username || 'Guest')}</td>
       <td>${b.amount.toFixed(2)}</td>
       <td class="${cls}">${atText}</td>
-      <td class="${cls}">${profitText}</td>
+      <td class="${cls} live-profit">${profitText}</td>
     </tr>`;
   }).join('');
+}
+
+function _updateLiveProfits(mult) {
+  if (state.phase !== 'running') return;
+  const tbody = document.getElementById('betsTbody');
+  if (!tbody) return;
+  for (const [userId, bet] of state.bets.entries()) {
+    if (bet.cashedOut) continue;
+    const cell = tbody.querySelector(`tr[data-userid="${userId}"] .live-profit`);
+    if (cell) {
+      cell.textContent = '+' + (bet.amount * mult - bet.amount).toFixed(2);
+    }
+  }
 }
 
 function _updateBetsAfterCrash(serverBets) {
@@ -515,17 +637,20 @@ async function doLogin() {
   if (!username || !password) { errEl.textContent = 'Fill in all fields'; return; }
 
   try {
+    log('AUTH', `login attempt user=${username}`);
     const res  = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
     const data = await res.json();
-    if (!res.ok) { errEl.textContent = data.error; return; }
+    if (!res.ok) { err('AUTH', `login failed: ${data.error}`); errEl.textContent = data.error; return; }
+    log('AUTH', `login OK user=${data.username} balance=${data.balance}`);
     _saveSession(data);
     closeAuthModal();
     showToast(`Welcome back, ${data.username}!`);
-  } catch {
+  } catch (e) {
+    err('AUTH', `login network error: ${e.message}`);
     errEl.textContent = 'Network error';
   }
 }
@@ -539,17 +664,20 @@ async function doRegister() {
   if (!username || !password) { errEl.textContent = 'Fill in all fields'; return; }
 
   try {
+    log('AUTH', `register attempt user=${username}`);
     const res  = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
     const data = await res.json();
-    if (!res.ok) { errEl.textContent = data.error; return; }
+    if (!res.ok) { err('AUTH', `register failed: ${data.error}`); errEl.textContent = data.error; return; }
+    log('AUTH', `register OK user=${data.username}`);
     _saveSession(data);
     closeAuthModal();
     showToast(`Account created! Welcome, ${data.username}!`);
-  } catch {
+  } catch (e) {
+    err('AUTH', `register network error: ${e.message}`);
     errEl.textContent = 'Network error';
   }
 }
@@ -568,6 +696,8 @@ function doLogout() {
   state.socket.disconnect();
   state.socket.connect();
 
+  state.myHistory = [];
+  _renderMyHistory();
   _updateUserUI();
   _renderPhase();
   showToast('Logged out');
@@ -581,6 +711,7 @@ function _saveSession({ token, username, balance }) {
   localStorage.setItem('crash_username', username);
   localStorage.setItem('crash_balance', balance);
 
+  log('AUTH', `session saved user=${username} — reconnecting socket with token`);
   // Reconnect with new token so server recognises us (socket.io v4 API)
   state.socket.auth = { token };
   state.socket.disconnect();
@@ -588,6 +719,7 @@ function _saveSession({ token, username, balance }) {
 
   _updateUserUI();
   _renderPhase();
+  _fetchPlayerHistory();
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -634,6 +766,148 @@ function showToast(msg, type = 'ok') {
   el.textContent = msg;
   container.appendChild(el);
   setTimeout(() => el.remove(), 3200);
+}
+
+// ─── Bankroll + Player history ────────────────────────────────────────────────
+
+function _updateBankrollUI() {
+  const el = document.getElementById('bankrollAmount');
+  if (el) el.textContent = state.houseBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function _fetchPlayerHistory() {
+  if (!state.token || !state.socket) return;
+  state.socket.emit('getPlayerHistory', {}, (res) => {
+    if (res.error || !res.rounds) return;
+    // Merge server rounds with client-tracked ones (server is source of truth)
+    state.myHistory = res.rounds;
+    _renderMyHistory();
+  });
+}
+
+function _renderMyHistory() {
+  const section = document.getElementById('playerHistorySection');
+  const tbody   = document.getElementById('myHistoryTbody');
+  const count   = document.getElementById('myHistoryCount');
+  if (!section || !tbody) return;
+
+  if (!state.token || state.myHistory.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+  count.textContent = state.myHistory.length + ' round' + (state.myHistory.length !== 1 ? 's' : '');
+
+  tbody.innerHTML = state.myHistory.slice(0, 10).map(r => {
+    const cashText = r.cashedOutAt ? r.cashedOutAt.toFixed(2) + '×' : '—';
+    const profitText = (r.profit >= 0 ? '+' : '') + r.profit.toFixed(2);
+    const cls = r.won ? 'win' : 'loss';
+    return `<tr>
+      <td>#${r.roundId}</td>
+      <td>${r.amount.toFixed(2)}</td>
+      <td class="${cls}">${cashText}</td>
+      <td class="${cls}">${profitText}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _renderGameHistory() {
+  const tbody = document.getElementById('gameHistoryTbody');
+  if (!tbody || state.history.length === 0) return;
+
+  // state.history has {id, crashPoint} — we need full data from server
+  fetch('/api/game/history')
+    .then(r => r.json())
+    .then(({ rounds }) => {
+      if (!rounds || rounds.length === 0) return;
+      tbody.innerHTML = rounds.slice(0, 20).map(r => {
+        const hashShort = r.serverSeedHash ? r.serverSeedHash.slice(0, 16) + '…' : '—';
+        const hasData = r.serverSeed && r.serverSeedHash;
+        return `<tr>
+          <td>#${r.id}</td>
+          <td class="${r.crashPoint < 2 ? 'loss' : r.crashPoint < 5 ? 'live' : 'win'}">${r.crashPoint.toFixed(2)}×</td>
+          <td style="font-size:10px;font-family:monospace">${hashShort}</td>
+          <td>${hasData
+            ? `<button class="btn-verify" onclick="verifyRound(${r.id},'${r.serverSeed}','${r.serverSeedHash}',${r.crashPoint},this)">VERIFY</button>`
+            : '—'
+          }</td>
+        </tr>`;
+      }).join('');
+    })
+    .catch(() => {});
+}
+
+function verifyRound(roundId, serverSeed, serverSeedHash, crashPoint, btn) {
+  btn.textContent = '...';
+  const params = new URLSearchParams({ serverSeed, serverSeedHash, crashPoint });
+  fetch(`/api/game/verify/${roundId}?${params}`)
+    .then(r => r.json())
+    .then(({ valid }) => {
+      btn.textContent = valid ? '✓ VALID' : '✗ INVALID';
+      btn.className = 'btn-verify ' + (valid ? 'valid' : 'invalid');
+    })
+    .catch(() => { btn.textContent = 'ERROR'; });
+}
+
+// ─── Win Animation ────────────────────────────────────────────────────────────
+
+function showWinAnimation(multiplier, profit) {
+  const el = document.createElement('div');
+  el.className = 'win-screen';
+  el.innerHTML = `
+    <div class="win-content">
+      <div class="win-title">★ WINNER ★</div>
+      <div class="win-mult-display">${multiplier.toFixed(2)}×</div>
+      <div class="win-profit-display">+ ${profit.toFixed(2)} COINS</div>
+    </div>`;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+  _spawnCoins();
+}
+
+function _spawnCoins() {
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:5999;';
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  document.body.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+  const palette = ['#ffd700','#ffaa00','#00ff88','#ffcc44','#ff8800'];
+  const coins = Array.from({ length: 55 }, () => ({
+    x: Math.random() * canvas.width,
+    y: -20 - Math.random() * 180,
+    vx: (Math.random() - 0.5) * 7,
+    vy: Math.random() * 2 + 1,
+    r: Math.random() * 9 + 4,
+    rot: Math.random() * Math.PI * 2,
+    vrot: (Math.random() - 0.5) * 0.18,
+    color: palette[Math.floor(Math.random() * palette.length)],
+  }));
+  let start = null;
+  (function frame(ts) {
+    if (!start) start = ts;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    let any = false;
+    for (const c of coins) {
+      c.x += c.vx; c.y += c.vy; c.vy += 0.13; c.rot += c.vrot;
+      if (c.y < canvas.height + 30) any = true;
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(c.rot);
+      const scaleY = Math.abs(Math.cos(c.rot * 3)) * 0.45 + 0.1;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, c.r, c.r * scaleY, 0, 0, Math.PI * 2);
+      ctx.fillStyle = c.color;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (any && ts - start < 3500) requestAnimationFrame(frame);
+    else canvas.remove();
+  })(0);
 }
 
 // ─── XSS-safe escaping ────────────────────────────────────────────────────────

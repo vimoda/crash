@@ -8,8 +8,55 @@
 </head>
 <body>
 
+<div class="modal-backdrop" id="resultModal" style="display:none">
+  <div class="modal">
+    <div class="modal-title">Round #<span id="resultRoundId">0</span> — Results</div>
+    <div class="result-crash-val">CRASH <span id="resultCrashPoint">0.00</span>×</div>
+    <div class="result-section">
+      <div class="result-row">
+        <span class="result-label">Server Seed Hash</span>
+        <span class="result-value hash" id="resultServerHash">—</span>
+      </div>
+      <div class="result-row">
+        <span class="result-label">Server Seed (revealed)</span>
+        <span class="result-value hash" id="resultServerSeed">—</span>
+      </div>
+    </div>
+    <div class="result-verify-box">
+      <p class="result-verify-title">How to Verify</p>
+      <p class="result-verify-text">Compute: <code>SHA256(server seed above)</code></p>
+      <p class="result-verify-text">It should match the hash above.</p>
+      <p class="result-verify-text" id="resultVerifyStatus"></p>
+    </div>
+    <div class="result-verify-manual">
+      <p class="result-verify-title">Verify Manually</p>
+      <div class="result-row">
+        <span class="result-label">Your computation</span>
+        <input type="text" id="resultVerifyManualInput" placeholder="Paste computed SHA256 here" style="flex:1;font-family:monospace;font-size:11px">
+      </div>
+      <button class="btn btn-verify-manual" onclick="verifyResultManually()">Check</button>
+    </div>
+    <div class="result-bets" id="resultBetsSection" style="display:none">
+      <div class="result-verify-title" style="margin-top:12px">Bets This Round</div>
+      <div class="table-wrap" style="max-height:150px">
+        <table class="bets-table">
+          <thead>
+            <tr><th>Player</th><th>Bet</th><th>@</th><th>Result</th></tr>
+          </thead>
+          <tbody id="resultBetsTbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="result-actions">
+      <button class="btn btn-verify-modal" id="btnVerifyResult" onclick="verifyCurrentResult()">VERIFY</button>
+      <button class="btn btn-outline" onclick="closeResultModal()">Close</button>
+    </div>
+    <button class="modal-close" onclick="closeResultModal()" aria-label="Close">✕</button>
+  </div>
+</div>
+
 <!-- ══════════════════ AUTH MODAL ══════════════════ -->
-<div class="modal-backdrop" id="authModal">
+<div class="modal-backdrop" id="authModal" style="display:none">
   <div class="modal">
     <div class="modal-tabs">
       <button class="modal-tab active" id="tabLogin" onclick="switchTab('login')">Login</button>
@@ -89,7 +136,7 @@
     <div class="game-top-bar">
       <div class="bankroll-label">
         <span class="bankroll-dot">●</span>
-        Bankroll <span id="bankrollAmount">10,000</span> COINS
+        Bankroll <span id="bankrollAmount">100,000</span> COINS
       </div>
       <div class="recent-pills" id="recentPills">
         <!-- last 3 results -->
@@ -163,6 +210,29 @@
     </div>
   </div>
 
+  <!-- ── Player History ── -->
+  <div class="player-history-section" id="playerHistorySection" style="display:none">
+    <div class="section-header">
+      <span>My Last 10 Rounds</span>
+      <span class="bet-count" id="myHistoryCount">0 rounds</span>
+    </div>
+    <div class="table-wrap">
+      <table class="bets-table">
+        <thead>
+          <tr>
+            <th>Round</th>
+            <th>Bet</th>
+            <th>Cashed @ </th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody id="myHistoryTbody">
+          <tr class="empty-row"><td colspan="4">No history yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- ── Provably Fair ── -->
   <div class="fair-section">
     <div class="fair-header" onclick="toggleFair()" style="cursor:pointer">
@@ -190,6 +260,24 @@
         After the crash the seed is revealed — compute
         <code>SHA256(serverSeed) = serverSeedHash</code> to verify.
       </p>
+      <div class="fair-history" id="fairHistory">
+        <div class="fair-label" style="margin-top:12px;margin-bottom:6px;">GAME HISTORY</div>
+        <div class="table-wrap" style="max-height:200px">
+          <table class="bets-table" id="gameHistoryTable">
+            <thead>
+              <tr>
+                <th>Round</th>
+                <th>Crash</th>
+                <th>Hash</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="gameHistoryTbody">
+              <tr class="empty-row"><td colspan="4">No history yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 

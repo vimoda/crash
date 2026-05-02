@@ -5,6 +5,9 @@ const users = new Map();   // username → user object
 const userById = new Map(); // id → user object
 const rounds = [];          // ring buffer, last 100 rounds
 
+let houseBalance = 100_000;
+const playerRounds = new Map(); // userId → array of {roundId, amount, cashedOutAt, profit, won}
+
 function createUser(username, passwordHash) {
   const id = crypto.randomUUID();
   const user = {
@@ -47,6 +50,24 @@ function getRecentRounds(limit = 30) {
   return rounds.slice(-limit).reverse();
 }
 
+function getHouseBalance() { return houseBalance; }
+
+function updateHouseBalance(delta) {
+  houseBalance = Math.max(0, Math.round((houseBalance + delta) * 100) / 100);
+  return houseBalance;
+}
+
+function addPlayerRound(userId, round) {
+  const rounds = playerRounds.get(userId) || [];
+  rounds.unshift(round); // newest first
+  if (rounds.length > 50) rounds.pop();
+  playerRounds.set(userId, rounds);
+}
+
+function getPlayerRounds(userId, limit = 10) {
+  return (playerRounds.get(userId) || []).slice(0, limit);
+}
+
 module.exports = {
   createUser,
   findUserByUsername,
@@ -54,4 +75,8 @@ module.exports = {
   updateBalance,
   addRound,
   getRecentRounds,
+  getHouseBalance,
+  updateHouseBalance,
+  addPlayerRound,
+  getPlayerRounds,
 };

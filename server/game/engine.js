@@ -49,10 +49,13 @@ class GameEngine extends EventEmitter {
     this.bets.clear();
     this.roundEndsAt = Date.now() + WAITING_MS;
 
+    console.log(`[engine] WAITING  round=${this.roundId} crashPoint=${this.crashPoint.toFixed(2)} hash=${this.serverSeedHash.slice(0,12)}…`);
+
     this.emit('waiting', {
       roundId: this.roundId,
       serverSeedHash: this.serverSeedHash,
       endsAt: this.roundEndsAt,
+      houseBalance: this.db.getHouseBalance(),
     });
 
     this._waitTimer = setTimeout(() => this._beginRunning(), WAITING_MS);
@@ -64,10 +67,13 @@ class GameEngine extends EventEmitter {
     this.startTime = Date.now();
     this.currentMultiplier = 1.00;
 
+    console.log(`[engine] RUNNING  round=${this.roundId} bets=${this.bets.size}`);
+
     this.emit('running', {
       roundId: this.roundId,
       serverSeedHash: this.serverSeedHash,
       startTime: this.startTime,
+      houseBalance: this.db.getHouseBalance(),
     });
 
     this._tick = setInterval(() => this._onTick(), TICK_MS);
@@ -80,6 +86,7 @@ class GameEngine extends EventEmitter {
     // Process any pending auto cash-outs before checking crash
     for (const [userId, bet] of this.bets.entries()) {
       if (!bet.cashedOut && bet.autoCashout !== null && this.currentMultiplier >= bet.autoCashout) {
+        console.log(`[engine] AUTO-CASHOUT userId=${userId} at=${bet.autoCashout}x mult=${this.currentMultiplier}`);
         this._doCashOut(userId, bet.autoCashout);
       }
     }
@@ -106,6 +113,9 @@ class GameEngine extends EventEmitter {
       profit: b.profit,
     }));
 
+    const winners = betsSnapshot.filter(b => b.cashedOut).length;
+    console.log(`[engine] CRASHED  round=${this.roundId} crashPoint=${this.crashPoint.toFixed(2)} bets=${betsSnapshot.length} winners=${winners}`);
+
     this.db.addRound({
       id: this.roundId,
       serverSeed: this.serverSeed,
@@ -114,12 +124,23 @@ class GameEngine extends EventEmitter {
       bets: betsSnapshot,
     });
 
+    for (const [userId, b] of this.bets.entries()) {
+      this.db.addPlayerRound(userId, {
+        roundId: this.roundId,
+        amount: b.amount,
+        cashedOutAt: b.cashedOut ? b.cashedOutAt : null,
+        profit: b.cashedOut ? b.profit - b.amount : -b.amount,
+        won: b.cashedOut,
+      });
+    }
+
     this.emit('crash', {
       roundId: this.roundId,
       crashPoint: this.crashPoint,
       serverSeed: this.serverSeed,      // revealed for provably-fair verification
       serverSeedHash: this.serverSeedHash,
       bets: betsSnapshot,
+      houseBalance: this.db.getHouseBalance(),
     });
 
     this._nextTimer = setTimeout(() => this._beginWaiting(), POST_CRASH_MS);
@@ -151,11 +172,18 @@ class GameEngine extends EventEmitter {
     const user = this.db.findUserById(userId);
     if (!user) throw new Error('User not found');
 
+    const housebal = this.db.getHouseBalance();
+    const maxBet = Math.min(10000, Math.floor(housebal * 0.01 * 100) / 100);
+    if (numAmount > maxBet) {
+      throw new Error(`Max bet is ${maxBet.toFixed(2)} (1% of house bankroll)`);
+    }
+
     const rounded = Math.round(numAmount * 100) / 100;
     if (user.balance < rounded) throw new Error('Insufficient balance');
 
     // Deduct immediately — loss is confirmed at crash, win is credited at cash-out
     this.db.updateBalance(userId, -rounded);
+    this.db.updateHouseBalance(rounded);
 
     this.bets.set(userId, {
       username,
@@ -166,20 +194,12 @@ class GameEngine extends EventEmitter {
       profit: 0,
     });
 
+    console.log(`[engine] BET      userId=${userId} amount=${rounded} autoCashout=${numAuto} round=${this.roundId}`);
     return { amount: rounded, autoCashout: numAuto };
   }
 
-  cancelBet(userId) {
-    if (this.state !== STATES.WAITING) {
-      throw new Error('Cannot cancel after the round has started');
-    }
-    const bet = this.bets.get(userId);
-    if (!bet) throw new Error('No active bet to cancel');
-
-    // Refund
-    this.db.updateBalance(userId, bet.amount);
-    this.bets.delete(userId);
-    return bet;
+  cancelBet() {
+    throw new Error('Bets cannot be cancelled once placed');
   }
 
   cashOut(userId) {
@@ -202,6 +222,9 @@ class GameEngine extends EventEmitter {
     bet.profit = Math.round(bet.amount * multiplier * 100) / 100;
 
     this.db.updateBalance(userId, bet.profit);
+    this.db.updateHouseBalance(-bet.profit);
+
+    console.log(`[engine] CASHOUT  userId=${userId} at=${multiplier.toFixed(2)}x amount=${bet.amount} payout=${bet.profit}`);
 
     this.emit('cashout', {
       userId,
@@ -230,6 +253,7 @@ class GameEngine extends EventEmitter {
       roundId: this.roundId,
       serverSeedHash: this.serverSeedHash,
       bets: betsArr,
+      houseBalance: this.db.getHouseBalance(),
     };
 
     if (this.state === STATES.WAITING) {
