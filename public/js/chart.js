@@ -34,6 +34,11 @@ class CrashChart {
     this.rocketTrail = []; // trail particles for exhaust effect
     this.explosionParticles = []; // explosion particles on crash
     this.myBetAmount = 0; // user's current bet amount for profit display
+
+    // CSS dimensions (before DPR scaling)
+    this.cssW = 0;
+    this.cssH = 0;
+
     this._resize();
 
     window.addEventListener('resize', () => this._resize());
@@ -104,8 +109,9 @@ class CrashChart {
     const crashPoint = last.mult;
     const crashed = this.state === 'crashed';
     const left = 44, bottom = 24, pad = 30;
-    const W = this.canvas.width / (window.devicePixelRatio || 1);
-    const H = this.canvas.height / (window.devicePixelRatio || 1);
+    const W = this.cssW;
+    const H = this.cssH;
+    if (!W || !H) return;
     const plotW = W - left - pad;
     const plotH = H - bottom - pad;
     const maxMult = Math.max(crashPoint * 1.15, 2);
@@ -150,9 +156,11 @@ class CrashChart {
   }
 
   _draw() {
-    const { ctx, canvas, state, points, crashedAt } = this;
-    const W = canvas.width;
-    const H = canvas.height;
+    const { ctx, state, points, crashedAt } = this;
+    const W = this.cssW;
+    const H = this.cssH;
+
+    if (W === 0 || H === 0) return; // not ready yet
 
     ctx.clearRect(0, 0, W, H);
 
@@ -405,14 +413,15 @@ class CrashChart {
 
   _drawRocket(ctx, x, y, mult, elapsed, isCrashed = false) {
     const speed = Math.min(1.5, 0.3 + mult * 0.08);
+    const scale = 2.5; // Make rocket 2.5x larger
 
     // Exhaust trail particles
     if (this.state === 'running') {
       const numParticles = Math.floor(2 + mult * 0.3);
       for (let i = 0; i < numParticles; i++) {
         this.rocketTrail.push({
-          x: x - 8 + Math.random() * 4 - 2,
-          y: y + 10 + Math.random() * 12,
+          x: x - 8 * scale + Math.random() * 4 * scale - 2 * scale,
+          y: y + 10 * scale + Math.random() * 12 * scale,
           vx: (Math.random() - 0.5) * 1.5,
           vy: Math.random() * 2 + speed,
           life: 1,
@@ -444,6 +453,26 @@ class CrashChart {
 
     ctx.save();
     ctx.translate(x, y);
+
+    // Calculate rocket angle based on curve tangent
+    const left = 44, bottom = 24, pad = 30;
+    const W = this.cssW;
+    const H = this.cssH;
+    const plotW = W - left - pad;
+    const plotH = H - bottom - pad;
+    const maxMult = Math.max(mult * 1.25, 2);
+    const maxElapsed = Math.max(elapsed * 1.25, 12000);
+
+    // Parametric derivatives with respect to elapsed
+    // dx/delapsed = plotW / maxElapsed
+    // dy/delapsed = -plotH / (maxMult - 1) * GROWTH_RATE * mult
+    const dx = plotW / maxElapsed;
+    const dy = -plotH / (maxMult - 1) * GROWTH_RATE * mult;
+    // Rocket is drawn pointing up (-PI/2), so we need to rotate by tangent angle + PI/2
+    const angle = Math.atan2(dy, dx) + Math.PI / 2;
+    ctx.rotate(angle);
+
+    ctx.scale(scale, scale);
 
     // Glow behind rocket
     const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, 18);
@@ -604,11 +633,14 @@ class CrashChart {
       setTimeout(() => this._resize(), 50);
       return;
     }
+    this.cssW = w;
+    this.cssH = h;
     this.canvas.width  = w * dpr;
     this.canvas.height = h * dpr;
     this.canvas.style.width  = w + 'px';
     this.canvas.style.height = h + 'px';
-    this.ctx.scale(dpr, dpr);
+    // Reset transform and scale once
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 }
 
