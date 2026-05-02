@@ -198,6 +198,83 @@ class GameEngine extends EventEmitter {
     return { amount: rounded, autoCashout: numAuto };
   }
 
+  // Queue bet for next round
+  queueBet(userId, username, amount, autoCashout = null) {
+    const existing = this.pendingBets && this.pendingBets.get(userId);
+    if (existing) {
+      throw new Error('You already have a queued bet');
+    }
+    const numAmount = parseFloat(amount);
+    if (!Number.isFinite(numAmount) || numAmount < 0.01 || numAmount > 10000) {
+      throw new Error('Bet amount must be between 0.01 and 10,000');
+    }
+    let numAuto = null;
+    if (autoCashout !== null && autoCashout !== '' && autoCashout !== undefined) {
+      numAuto = parseFloat(autoCashout);
+      if (!Number.isFinite(numAuto) || numAuto < 1.01) {
+        throw new Error('Auto cash-out must be ≥ 1.01');
+      }
+    }
+    if (!this.pendingBets) this.pendingBets = new Map();
+    this.pendingBets.set(userId, {
+      username,
+      amount: Math.round(numAmount * 100) / 100,
+      autoCashout: numAuto,
+    });
+    console.log(`[engine] QUEUE   userId=${userId} amount=${Math.round(numAmount * 100) / 100} autoCashout=${numAuto}`);
+    return { amount: Math.round(numAmount * 100) / 100, autoCashout: numAuto };
+  }
+
+  // Process queued bets when entering waiting phase
+  _processQueuedBets() {
+    if (!this.pendingBets || this.pendingBets.size === 0) return;
+    for (const [userId, q] of this.pendingBets.entries()) {
+      const user = this.db.findUserById(userId);
+      if (!user) continue;
+      if (user.balance < q.amount) {
+        console.log(`[engine] QUEUESKIP userId=${userId} insufficient balance`);
+        continue;
+      }
+      const housebal = this.db.getHouseBalance();
+      const maxBet = Math.min(10000, Math.floor(housebal * 0.01 * 100) / 100);
+      if (q.amount > maxBet) {
+        console.log(`[engine] QUEUESKIP userId=${userId} bet exceeds max`);
+        continue;
+      }
+      this.db.updateBalance(userId, -q.amount);
+      this.db.updateHouseBalance(q.amount);
+      this.bets.set(userId, {
+        username: q.username,
+        amount: q.amount,
+        autoCashout: q.autoCashout,
+        cashedOut: false,
+        cashedOutAt: null,
+        profit: 0,
+      });
+      console.log(`[engine] QUEUEAPPLY userId=${userId} amount=${q.amount} round=${this.roundId}`);
+      io.emit('betPlaced', {
+        userId,
+        username: q.username,
+        amount: q.amount,
+        autoCashout: q.autoCashout,
+      });
+    }
+    this.pendingBets.clear();
+  }
+
+  // Get pending bet for user
+  getQueuedBet(userId) {
+    if (!this.pendingBets) return null;
+    return this.pendingBets.get(userId) || null;
+  }
+
+  // Remove queued bet
+  cancelQueuedBet(userId) {
+    if (this.pendingBets) {
+      this.pendingBets.delete(userId);
+    }
+  }
+
   cancelBet() {
     throw new Error('Bets cannot be cancelled once placed');
   }
